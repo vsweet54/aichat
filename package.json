@@ -1,0 +1,10 @@
+{
+  "name": "neo-floating-ai-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Proxy Vercel untuk NEO Floating AI (meneruskan request ke Zapi AI)",
+  "engines": {
+    "node": ">=18"
+  }
+}
