@@ -3,7 +3,8 @@
 // Body: { "provider": "gemini" | "zapi", ...payload }
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-3.8-flash"];
 
 const ZAPI_BASE = process.env.ZAPI_BASE_URL || "https://api.zapi.ink";
 const ZAPI_MODEL_PATH = {
@@ -14,7 +15,7 @@ const ZAPI_MODEL_PATH = {
   "google-aimode": "/v1/ai:google-aimode/chat",
 };
 const ZAPI_ORDER = ["chatex", "copilot", "dolphin"];
-const TIMEOUT_MS = Number(process.env.TIMEOUT_MS || 20000);
+const TIMEOUT_MS = Number(process.env.TIMEOUT_MS || 15000);
 
 function getZapiKeys() {
   const numbered = Object.keys(process.env)
@@ -34,18 +35,44 @@ async function fetchWithTimeout(url, options, ms) {
   } finally { clearTimeout(timer); }
 }
 
-async function callGemini(modelName, payload) {
+async function callSingleGemini(modelName, payload) {
   if (!GEMINI_API_KEY) throw { status: 500, message: "GEMINI_API_KEY belum diatur di Vercel" };
-  const targetModel = modelName || DEFAULT_GEMINI_MODEL;
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
   const res = await fetchWithTimeout(
     `${url}?key=${GEMINI_API_KEY}`,
     { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
     TIMEOUT_MS
   );
   const data = await res.json();
-  if (!res.ok) throw { status: res.status, message: data?.error?.message || `Gemini HTTP ${res.status}` };
+  if (!res.ok) {
+    const err = new Error(data?.error?.message || `Gemini HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
   return data;
+}
+
+async function callGeminiWithFallback(preferredModel, payload, allowFallback = true) {
+  const primary = preferredModel || DEFAULT_GEMINI_MODEL;
+  const queue = allowFallback
+    ? [primary, ...GEMINI_MODELS.filter(m => m !== primary)]
+    : [primary];
+
+  let lastError;
+  for (const m of queue) {
+    try {
+      const data = await callSingleGemini(m, payload);
+      return { model: m, data };
+    } catch (e) {
+      lastError = e;
+      // If error is high demand / 503 / 429 / 404, try next model in queue
+      if ([404, 429, 500, 503].includes(e.status) || (e.message && e.message.includes("high demand"))) {
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastError || new Error("Semua model Gemini sedang sibuk");
 }
 
 async function callZapi(model, payload) {
@@ -84,9 +111,8 @@ export default async function handler(req, res) {
 
   try {
     if (provider === "gemini") {
-      const targetModel = model || DEFAULT_GEMINI_MODEL;
-      const data = await callGemini(targetModel, payload);
-      return res.status(200).json({ provider: "gemini", model: targetModel, data });
+      const { model: usedModel, data } = await callGeminiWithFallback(model, payload, fallback !== false);
+      return res.status(200).json({ provider: "gemini", model: usedModel, data });
     } else {
       const queue = model
         ? (fallback ? ZAPI_ORDER.slice(ZAPI_ORDER.indexOf(model)) : [model])
