@@ -3,8 +3,7 @@
 // Body: { "provider": "gemini" | "zapi", ...payload }
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL   = process.env.GEMINI_MODEL || "gemini-2.0-flash";
-const GEMINI_URL     = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.8-flash";
 
 const ZAPI_BASE = process.env.ZAPI_BASE_URL || "https://api.zapi.ink";
 const ZAPI_MODEL_PATH = {
@@ -35,10 +34,12 @@ async function fetchWithTimeout(url, options, ms) {
   } finally { clearTimeout(timer); }
 }
 
-async function callGemini(payload) {
+async function callGemini(modelName, payload) {
   if (!GEMINI_API_KEY) throw { status: 500, message: "GEMINI_API_KEY belum diatur di Vercel" };
+  const targetModel = modelName || DEFAULT_GEMINI_MODEL;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent`;
   const res = await fetchWithTimeout(
-    `${GEMINI_URL}?key=${GEMINI_API_KEY}`,
+    `${url}?key=${GEMINI_API_KEY}`,
     { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
     TIMEOUT_MS
   );
@@ -83,8 +84,9 @@ export default async function handler(req, res) {
 
   try {
     if (provider === "gemini") {
-      const data = await callGemini(payload);
-      return res.status(200).json({ provider: "gemini", model: GEMINI_MODEL, data });
+      const targetModel = model || DEFAULT_GEMINI_MODEL;
+      const data = await callGemini(targetModel, payload);
+      return res.status(200).json({ provider: "gemini", model: targetModel, data });
     } else {
       const queue = model
         ? (fallback ? ZAPI_ORDER.slice(ZAPI_ORDER.indexOf(model)) : [model])
