@@ -27,9 +27,9 @@ const OPENROUTER_MODELS = (process.env.OPENROUTER_MODELS || "").split(",").map(s
 const GEMINI_MODEL  = process.env.GEMINI_MODEL  || "gemini-3.8-flash";
 const GEMINI_BACKUP = "gemini-1.5-flash";
 
-// Timeout lebih pendek = fail-fast → coba model berikutnya lebih cepat
-const TIMEOUT_MS = Number(process.env.TIMEOUT_MS || 15000);
-const MAX_RETRY  = 1; // maksimal 1 retry per model (bukan 2)
+// Vercel free tier limit = 10 detik. Set 8s agar fail-fast sebelum di-cut Vercel.
+const TIMEOUT_MS = Number(process.env.TIMEOUT_MS || 8000);
+const MAX_RETRY  = 0; // tanpa retry — langsung loncat ke model berikutnya
 
 // Gemini sengaja terakhir — user intentional
 const PROVIDER_ORDER = ["openrouter", "gemini"];
