@@ -1,19 +1,19 @@
 // AI CBT Solver — Triple Provider Proxy
-// OpenRouter → NVIDIA NIM → Gemini Flash (auto-fallback)
+// OpenRouter → NVIDIA NIM → Gemini Flash (Gemini sebagai fallback terakhir)
 // POST /api/chat
-// Body: { "provider": "auto"|"openrouter"|"nvidia"|"gemini", ...payload }
 
 const OPENROUTER_KEY  = process.env.OPENROUTER_API_KEY;
 const NVIDIA_KEY      = process.env.NVIDIA_API_KEY;
 const GEMINI_KEY      = process.env.GEMINI_API_KEY;
 
-const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "qwen/qwen2.5-vl-72b-instruct:free";
-const NVIDIA_MODEL     = process.env.NVIDIA_MODEL     || "meta/llama-3.2-11b-vision-instruct";
-const GEMINI_MODEL     = process.env.GEMINI_MODEL     || "gemini-2.0-flash";
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "meta-llama/llama-3.2-11b-vision-instruct:free";
+const NVIDIA_MODEL     = process.env.NVIDIA_MODEL     || "meta/llama-3.2-90b-vision-instruct";
+const GEMINI_MODEL     = process.env.GEMINI_MODEL     || "gemini-3.8-flash";
 const GEMINI_BACKUP    = "gemini-1.5-flash";
 
 const TIMEOUT_MS = Number(process.env.TIMEOUT_MS || 25000);
 const MAX_RETRY  = 2;
+// Gemini sengaja ditaruh di urutan terakhir sebagai cadangan pamungkas
 const PROVIDER_ORDER = ["openrouter", "nvidia", "gemini"];
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -27,62 +27,72 @@ async function fetchT(url, opts, ms = TIMEOUT_MS) {
 
 async function callOpenRouter(messages) {
   if (!OPENROUTER_KEY) throw { status: 500, message: "OPENROUTER_API_KEY belum diatur" };
-  for (let i = 0; i <= MAX_RETRY; i++) {
-    if (i > 0) await sleep(1000 * i);
-    try {
-      const res = await fetchT("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${OPENROUTER_KEY}`,
-          "HTTP-Referer": "https://aichat-nine-beta.vercel.app",
-          "X-Title": "AI CBT Solver"
-        },
-        body: JSON.stringify({ model: OPENROUTER_MODEL, messages, max_tokens: 400, temperature: 0.1 })
-      });
-      const data = await res.json();
-      if (res.status === 429 || res.status === 503) { if (i < MAX_RETRY) continue; throw { status: res.status, message: "OpenRouter overload" }; }
-      if (!res.ok) throw { status: res.status, message: data?.error?.message || `OpenRouter HTTP ${res.status}` };
-      const text = data?.choices?.[0]?.message?.content;
-      if (!text) throw { status: 500, message: "OpenRouter: response kosong" };
-      return { text, model: data.model || OPENROUTER_MODEL };
-    } catch (e) {
-      if (e.name === "AbortError") { if (i < MAX_RETRY) continue; throw { status: 408, message: "OpenRouter timeout" }; }
-      if (e.status) throw e;
-      if (i < MAX_RETRY) continue;
-      throw { status: 500, message: e.message };
+  const models = [OPENROUTER_MODEL, "meta-llama/llama-3.2-11b-vision-instruct:free", "google/gemini-2.0-flash-exp:free"].filter(Boolean);
+  let lastErr;
+  for (const m of [...new Set(models)]) {
+    for (let i = 0; i <= MAX_RETRY; i++) {
+      if (i > 0) await sleep(1000 * i);
+      try {
+        const res = await fetchT("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${OPENROUTER_KEY}`,
+            "HTTP-Referer": "https://aichat-nine-beta.vercel.app",
+            "X-Title": "AI CBT Solver"
+          },
+          body: JSON.stringify({ model: m, messages, max_tokens: 400, temperature: 0.1 })
+        });
+        const data = await res.json();
+        if (res.status === 429 || res.status === 503) { if (i < MAX_RETRY) continue; break; }
+        if (!res.ok) { lastErr = { status: res.status, message: data?.error?.message || `OpenRouter HTTP ${res.status}` }; break; }
+        const text = data?.choices?.[0]?.message?.content;
+        if (!text) { lastErr = { status: 500, message: "OpenRouter: response kosong" }; break; }
+        return { text, model: data.model || m };
+      } catch (e) {
+        if (e.name === "AbortError") { if (i < MAX_RETRY) continue; lastErr = { status: 408, message: "OpenRouter timeout" }; break; }
+        lastErr = e;
+        break;
+      }
     }
   }
+  throw lastErr || { status: 500, message: "OpenRouter semua model gagal" };
 }
 
 async function callNvidia(messages) {
   if (!NVIDIA_KEY) throw { status: 500, message: "NVIDIA_API_KEY belum diatur" };
-  for (let i = 0; i <= MAX_RETRY; i++) {
-    if (i > 0) await sleep(1000 * i);
-    try {
-      const res = await fetchT("https://integrate.api.nvidia.com/v1/chat/completions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${NVIDIA_KEY}` },
-        body: JSON.stringify({ model: NVIDIA_MODEL, messages, max_tokens: 400, temperature: 0.1 })
-      });
-      const data = await res.json();
-      if (res.status === 429 || res.status === 503) { if (i < MAX_RETRY) continue; throw { status: res.status, message: "NVIDIA overload" }; }
-      if (!res.ok) throw { status: res.status, message: data?.detail || `NVIDIA HTTP ${res.status}` };
-      const text = data?.choices?.[0]?.message?.content;
-      if (!text) throw { status: 500, message: "NVIDIA: response kosong" };
-      return { text, model: NVIDIA_MODEL };
-    } catch (e) {
-      if (e.name === "AbortError") { if (i < MAX_RETRY) continue; throw { status: 408, message: "NVIDIA timeout" }; }
-      if (e.status) throw e;
-      if (i < MAX_RETRY) continue;
-      throw { status: 500, message: e.message };
+  const models = [NVIDIA_MODEL, "meta/llama-3.2-90b-vision-instruct", "mistralai/pixtral-12b"].filter(Boolean);
+  let lastErr;
+  for (const m of [...new Set(models)]) {
+    for (let i = 0; i <= MAX_RETRY; i++) {
+      if (i > 0) await sleep(1000 * i);
+      try {
+        const res = await fetchT("https://integrate.api.nvidia.com/v1/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${NVIDIA_KEY}` },
+          body: JSON.stringify({ model: m, messages, max_tokens: 400, temperature: 0.1 })
+        });
+        const data = await res.json();
+        if (res.status === 429 || res.status === 503) { if (i < MAX_RETRY) continue; break; }
+        if (!res.ok) { lastErr = { status: res.status, message: data?.detail || `NVIDIA HTTP ${res.status}` }; break; }
+        const text = data?.choices?.[0]?.message?.content;
+        if (!text) { lastErr = { status: 500, message: "NVIDIA: response kosong" }; break; }
+        return { text, model: m };
+      } catch (e) {
+        if (e.name === "AbortError") { if (i < MAX_RETRY) continue; lastErr = { status: 408, message: "NVIDIA timeout" }; break; }
+        lastErr = e;
+        break;
+      }
     }
   }
+  throw lastErr || { status: 500, message: "NVIDIA semua model gagal" };
 }
 
 async function callGemini(payload) {
   if (!GEMINI_KEY) throw { status: 500, message: "GEMINI_API_KEY belum diatur" };
-  for (const model of [GEMINI_MODEL, GEMINI_BACKUP]) {
+  const models = [GEMINI_MODEL, "gemini-3.8-flash", GEMINI_BACKUP, "gemini-1.5-flash", "gemini-1.5-pro"].filter(Boolean);
+  let lastErr;
+  for (const model of [...new Set(models)]) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
     for (let i = 0; i <= MAX_RETRY; i++) {
       if (i > 0) await sleep(1000 * i);
@@ -90,17 +100,21 @@ async function callGemini(payload) {
         const res = await fetchT(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
         const data = await res.json();
         if (res.status === 429 || res.status === 503) { if (i < MAX_RETRY) continue; break; }
-        if (!res.ok) throw { status: res.status, message: data?.error?.message || `Gemini HTTP ${res.status}` };
+        if (!res.ok) {
+          lastErr = { status: res.status, message: data?.error?.message || `Gemini HTTP ${res.status}` };
+          break; // Jika model 404 / deprecated, lanjut coba model Gemini berikutnya
+        }
         const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!text) throw { status: 500, message: "Gemini: response kosong" };
+        if (!text) { lastErr = { status: 500, message: "Gemini: response kosong" }; break; }
         return { text, model };
       } catch (e) {
-        if (e.name === "AbortError" || !e.status) { if (i < MAX_RETRY) continue; break; }
-        throw e;
+        if (e.name === "AbortError") { if (i < MAX_RETRY) continue; lastErr = { status: 408, message: "Gemini timeout" }; break; }
+        lastErr = e;
+        break;
       }
     }
   }
-  throw { status: 503, message: "Gemini semua model penuh" };
+  throw lastErr || { status: 503, message: "Gemini semua model penuh" };
 }
 
 function toGeminiPayload(messages) {
