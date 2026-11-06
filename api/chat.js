@@ -1,132 +1,255 @@
-// AI CBT Solver — Vercel Proxy (tanpa token)
+// AI CBT Solver — Triple Provider Proxy
+// OpenRouter → NVIDIA NIM → Gemini Flash (auto-fallback)
 // POST /api/chat
-// Body: { "provider": "gemini" | "zapi", ...payload }
+// Body: { "provider": "auto"|"openrouter"|"nvidia"|"gemini", ...payload }
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-3.8-flash"];
+// ─── Config ───────────────────────────────────────────────────────────────
+const OPENROUTER_KEY  = process.env.OPENROUTER_API_KEY;
+const NVIDIA_KEY      = process.env.NVIDIA_API_KEY;
+const GEMINI_KEY      = process.env.GEMINI_API_KEY;
 
-const ZAPI_BASE = process.env.ZAPI_BASE_URL || "https://api.zapi.ink";
-const ZAPI_MODEL_PATH = {
-  chatex:          "/v1/ai:chatex/chat",
-  copilot:         "/v1/ai:copilot/chat",
-  dolphin:         "/v1/ai:dolphin/chat",
-  felo:            "/v1/ai:felo/chat",
-  "google-aimode": "/v1/ai:google-aimode/chat",
+// Model vision terbaik per provider (semua GRATIS)
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "qwen/qwen2.5-vl-72b-instruct:free";
+const NVIDIA_MODEL     = process.env.NVIDIA_MODEL     || "meta/llama-3.2-11b-vision-instruct";
+const GEMINI_MODEL     = process.env.GEMINI_MODEL     || "gemini-2.0-flash";
+const GEMINI_BACKUP    = "gemini-1.5-flash";
+
+const TIMEOUT_MS = Number(process.env.TIMEOUT_MS || 25000);
+const MAX_RETRY  = 2;
+
+// Urutan fallback default
+const PROVIDER_ORDER = ["openrouter", "nvidia", "gemini"];
+
+// ─── Endpoints ────────────────────────────────────────────────────────────
+const ENDPOINTS = {
+  openrouter: "https://openrouter.ai/api/v1/chat/completions",
+  nvidia:     "https://integrate.api.nvidia.com/v1/chat/completions",
+  gemini:     `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
 };
-const ZAPI_ORDER = ["chatex", "copilot", "dolphin"];
-const TIMEOUT_MS = Number(process.env.TIMEOUT_MS || 15000);
 
-function getZapiKeys() {
-  const numbered = Object.keys(process.env)
-    .filter(k => /^ZAPI_KEY_\d+$/.test(k))
-    .sort((a, b) => Number(a.split("_").pop()) - Number(b.split("_").pop()))
-    .map(k => process.env[k]);
-  const listed = (process.env.ZAPI_API_KEYS || "").split(",");
-  return [...numbered, ...listed].map(k => (k||"").trim()).filter(Boolean)
-    .filter((k,i,a) => a.indexOf(k) === i);
-}
+// ─── Helpers ──────────────────────────────────────────────────────────────
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-async function fetchWithTimeout(url, options, ms) {
+async function fetchT(url, opts, ms = TIMEOUT_MS) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), ms);
-  try {
-    return await fetch(url, { ...options, signal: ctrl.signal });
-  } finally { clearTimeout(timer); }
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try { return await fetch(url, { ...opts, signal: ctrl.signal }); }
+  finally { clearTimeout(t); }
 }
 
-async function callSingleGemini(modelName, payload) {
-  if (!GEMINI_API_KEY) throw { status: 500, message: "GEMINI_API_KEY belum diatur di Vercel" };
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
-  const res = await fetchWithTimeout(
-    `${url}?key=${GEMINI_API_KEY}`,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
-    TIMEOUT_MS
-  );
-  const data = await res.json();
-  if (!res.ok) {
-    const err = new Error(data?.error?.message || `Gemini HTTP ${res.status}`);
-    err.status = res.status;
-    throw err;
-  }
-  return data;
-}
+// ─── OpenRouter call (OpenAI-compatible, support vision) ──────────────────
+// Model gratis vision: qwen/qwen2.5-vl-72b-instruct:free
+//                      meta-llama/llama-3.2-11b-vision-instruct:free
+//                      google/gemini-2.0-flash-exp:free
+async function callOpenRouter(messages) {
+  if (!OPENROUTER_KEY) throw { status: 500, message: "OPENROUTER_API_KEY belum diatur" };
 
-async function callGeminiWithFallback(preferredModel, payload, allowFallback = true) {
-  const primary = preferredModel || DEFAULT_GEMINI_MODEL;
-  const queue = allowFallback
-    ? [primary, ...GEMINI_MODELS.filter(m => m !== primary)]
-    : [primary];
-
-  let lastError;
-  for (const m of queue) {
+  for (let i = 0; i <= MAX_RETRY; i++) {
+    if (i > 0) await sleep(1000 * i);
     try {
-      const data = await callSingleGemini(m, payload);
-      return { model: m, data };
-    } catch (e) {
-      lastError = e;
-      // If error is high demand / 503 / 429 / 404, try next model in queue
-      if ([404, 429, 500, 503].includes(e.status) || (e.message && e.message.includes("high demand"))) {
-        continue;
+      const res = await fetchT(ENDPOINTS.openrouter, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${OPENROUTER_KEY}`,
+          "HTTP-Referer": "https://aichat-nine-beta.vercel.app",
+          "X-Title": "AI CBT Solver"
+        },
+        body: JSON.stringify({
+          model: OPENROUTER_MODEL,
+          messages,
+          max_tokens: 400,
+          temperature: 0.1
+        })
+      });
+
+      const data = await res.json();
+      if (res.status === 429 || res.status === 503) {
+        if (i < MAX_RETRY) continue;
+        throw { status: res.status, message: "OpenRouter rate limit / overload" };
       }
-      throw e;
+      if (!res.ok) throw { status: res.status, message: data?.error?.message || `OpenRouter HTTP ${res.status}` };
+
+      // Ambil teks jawaban (OpenAI format)
+      const text = data?.choices?.[0]?.message?.content;
+      if (!text) throw { status: 500, message: "OpenRouter: response kosong" };
+      return { text, model: data.model || OPENROUTER_MODEL };
+    } catch (e) {
+      if (e.name === "AbortError") { if (i < MAX_RETRY) continue; throw { status: 408, message: "OpenRouter timeout" }; }
+      if (e.status) throw e;
+      if (i < MAX_RETRY) continue;
+      throw { status: 500, message: e.message };
     }
   }
-  throw lastError || new Error("Semua model Gemini sedang sibuk");
 }
 
-async function callZapi(model, payload) {
-  const keys = getZapiKeys();
-  if (!keys.length) throw { status: 500, message: "ZAPI_KEY_1 belum diatur" };
-  const path = ZAPI_MODEL_PATH[model];
-  if (!path) throw { status: 400, message: `Model tidak dikenal: ${model}` };
-  const start = Math.floor(Math.random() * keys.length);
-  const rotated = [...keys.slice(start), ...keys.slice(0, start)];
-  let lastErr;
-  for (const key of rotated) {
+// ─── NVIDIA NIM call (OpenAI-compatible, support vision) ──────────────────
+// Model gratis vision: meta/llama-3.2-11b-vision-instruct
+//                      google/paligemma
+async function callNvidia(messages) {
+  if (!NVIDIA_KEY) throw { status: 500, message: "NVIDIA_API_KEY belum diatur" };
+
+  for (let i = 0; i <= MAX_RETRY; i++) {
+    if (i > 0) await sleep(1000 * i);
     try {
-      const res = await fetchWithTimeout(
-        ZAPI_BASE + path,
-        { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": key }, body: JSON.stringify(payload) },
-        TIMEOUT_MS
-      );
+      const res = await fetchT(ENDPOINTS.nvidia, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${NVIDIA_KEY}`
+        },
+        body: JSON.stringify({
+          model: NVIDIA_MODEL,
+          messages,
+          max_tokens: 400,
+          temperature: 0.1
+        })
+      });
+
       const data = await res.json();
-      if (!res.ok) { const e = new Error(`HTTP ${res.status}`); e.status = res.status; if ([401,403,429].includes(res.status)) { lastErr = e; continue; } throw e; }
-      return data;
-    } catch (e) { lastErr = e; }
+      if (res.status === 429 || res.status === 503) {
+        if (i < MAX_RETRY) continue;
+        throw { status: res.status, message: "NVIDIA rate limit / overload" };
+      }
+      if (!res.ok) throw { status: res.status, message: data?.detail || `NVIDIA HTTP ${res.status}` };
+
+      const text = data?.choices?.[0]?.message?.content;
+      if (!text) throw { status: 500, message: "NVIDIA: response kosong" };
+      return { text, model: NVIDIA_MODEL };
+    } catch (e) {
+      if (e.name === "AbortError") { if (i < MAX_RETRY) continue; throw { status: 408, message: "NVIDIA timeout" }; }
+      if (e.status) throw e;
+      if (i < MAX_RETRY) continue;
+      throw { status: 500, message: e.message };
+    }
   }
-  throw lastErr || new Error("Semua key gagal");
 }
 
+// ─── Gemini call (native format, support vision) ───────────────────────────
+// Model: gemini-2.0-flash (1500 req/hari gratis) → gemini-1.5-flash (backup)
+async function callGemini(geminiPayload) {
+  if (!GEMINI_KEY) throw { status: 500, message: "GEMINI_API_KEY belum diatur" };
+
+  const models = [GEMINI_MODEL, GEMINI_BACKUP];
+  for (const model of models) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
+    for (let i = 0; i <= MAX_RETRY; i++) {
+      if (i > 0) await sleep(1000 * i);
+      try {
+        const res = await fetchT(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(geminiPayload)
+        });
+
+        const data = await res.json();
+        if (res.status === 429 || res.status === 503) {
+          if (i < MAX_RETRY) continue;
+          break; // coba model backup
+        }
+        if (!res.ok) throw { status: res.status, message: data?.error?.message || `Gemini HTTP ${res.status}` };
+
+        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!text) throw { status: 500, message: "Gemini: response kosong" };
+        return { text, model };
+      } catch (e) {
+        if (e.name === "AbortError") { if (i < MAX_RETRY) continue; break; }
+        if (e.status) throw e;
+        if (i < MAX_RETRY) continue;
+        break;
+      }
+    }
+  }
+  throw { status: 503, message: "Gemini semua model penuh, coba lagi sebentar" };
+}
+
+// ─── Convert messages OpenAI → Gemini format ──────────────────────────────
+function toGeminiPayload(messages) {
+  const parts = [];
+  for (const msg of messages) {
+    if (typeof msg.content === "string") {
+      parts.push({ text: msg.content });
+    } else if (Array.isArray(msg.content)) {
+      for (const c of msg.content) {
+        if (c.type === "text") parts.push({ text: c.text });
+        if (c.type === "image_url") {
+          const url = c.image_url?.url || "";
+          if (url.startsWith("data:")) {
+            const [meta, data] = url.split(",");
+            const mimeType = meta.split(":")[1].split(";")[0];
+            parts.push({ inlineData: { mimeType, data } });
+          }
+        }
+      }
+    }
+  }
+  return {
+    contents: [{ parts }],
+    generationConfig: { temperature: 0.1, maxOutputTokens: 400 }
+  };
+}
+
+// ─── Main handler ──────────────────────────────────────────────────────────
 export default async function handler(req, res) {
+  if (req.method === "OPTIONS") {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    return res.status(200).end();
+  }
+
   if (req.method !== "POST") return res.status(405).json({ error: "Method tidak diizinkan" });
 
-  // CORS — boleh diakses dari mana saja
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   const body = typeof req.body === "object" ? req.body : {};
-  const { provider = "gemini", model, fallback = true, ...payload } = body;
+  const { provider = "auto", messages, ...geminiPayload } = body;
 
-  try {
-    if (provider === "gemini") {
-      const { model: usedModel, data } = await callGeminiWithFallback(model, payload, fallback !== false);
-      return res.status(200).json({ provider: "gemini", model: usedModel, data });
-    } else {
-      const queue = model
-        ? (fallback ? ZAPI_ORDER.slice(ZAPI_ORDER.indexOf(model)) : [model])
-        : ZAPI_ORDER;
-      const errors = [];
-      for (const m of queue) {
-        try {
-          const data = await callZapi(m, payload);
-          return res.status(200).json({ provider: "zapi", model: m, data, tried: errors.map(e => e.model) });
-        } catch (e) { errors.push({ model: m, error: e.message }); }
-      }
-      return res.status(502).json({ error: "Semua model gagal", details: errors });
-    }
-  } catch (e) {
-    return res.status(e.status || 500).json({ error: e.message || "Internal error" });
+  if (!messages && !geminiPayload.contents) {
+    return res.status(400).json({ error: "Field 'messages' atau 'contents' diperlukan" });
   }
+
+  // Tentukan urutan provider
+  const queue = provider === "auto"
+    ? PROVIDER_ORDER
+    : [provider, ...PROVIDER_ORDER.filter(p => p !== provider)];
+
+  const errors = [];
+
+  for (const p of queue) {
+    try {
+      let result;
+
+      if (p === "openrouter") {
+        result = await callOpenRouter(messages || []);
+      } else if (p === "nvidia") {
+        result = await callNvidia(messages || []);
+      } else if (p === "gemini") {
+        // Gemini butuh format berbeda
+        const payload = geminiPayload.contents
+          ? geminiPayload
+          : toGeminiPayload(messages || []);
+        result = await callGemini(payload);
+      } else {
+        continue;
+      }
+
+      return res.status(200).json({
+        provider: p,
+        model: result.model,
+        text: result.text,
+        tried: errors.map(e => e.provider)
+      });
+
+    } catch (e) {
+      errors.push({ provider: p, error: e.message, status: e.status });
+      // Lanjut ke provider berikutnya
+    }
+  }
+
+  // Semua gagal
+  return res.status(502).json({
+    error: "Semua provider gagal merespons",
+    details: errors
+  });
 }
