@@ -12,35 +12,29 @@ const OPENROUTER_MODELS = [
   "nvidia/nemotron-3.5-lightning:free",
   "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
   "dots-studio/dots-3-note-preview:free",
-  "nvidia/nemotron-3-ultra-550b-a55b:free",
   "openrouter/free"
 ];
 
-// NVIDIA NIM Models (90b terbukti aktif & support vision)
+// NVIDIA NIM Vision Models (90b terbukti aktif & responsif)
 const NVIDIA_MODELS = [
   "meta/llama-3.2-90b-vision-instruct",
-  "mistralai/pixtral-12b",
-  "nvidia/nemotron-4-340b-instruct"
+  "mistralai/pixtral-12b"
 ];
 
-// Gemini Models (v1beta)
+// Gemini Models (gemini-2.0-flash punya kuota 1500 req/hari, bukan 20)
 const GEMINI_MODELS = [
   "gemini-2.0-flash",
   "gemini-2.0-flash-exp",
-  "gemini-1.5-flash",
   "gemini-1.5-flash-8b",
   "gemini-1.5-pro",
   "gemini-3.8-flash"
 ];
 
-// Timeout fail-fast agar tidak diputus paksa oleh Vercel (limit 10s)
-const TIMEOUT_MS = Number(process.env.TIMEOUT_MS || 7000);
-const MAX_RETRY  = 0;
+// Timeout per request (Vercel maxDuration adalah 30s)
+const TIMEOUT_MS = Number(process.env.TIMEOUT_MS || 16000);
 
 // Sesuai instruksi user: Gemini selalu di urutan terakhir
 const PROVIDER_ORDER = ["openrouter", "nvidia", "gemini"];
-
-const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function fetchT(url, opts, ms = TIMEOUT_MS) {
   const ctrl = new AbortController();
@@ -70,6 +64,10 @@ async function callOpenRouter(messages) {
       const data = await res.json();
       if (!res.ok) {
         lastErr = { status: res.status, message: `${model}: ${data?.error?.message || res.statusText}` };
+        // Jika limit kuota harian habis, langsung hentikan OpenRouter agar hemat waktu
+        if (res.status === 429 && data?.error?.message?.includes("free-models-per-day")) {
+          break;
+        }
         continue;
       }
       const text = data?.choices?.[0]?.message?.content;
