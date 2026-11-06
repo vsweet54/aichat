@@ -14,7 +14,7 @@ function getKeys(prefix, singleEnv) {
   const csv = (process.env[`${prefix}S`] || "").split(",");
   const single = process.env[singleEnv] ? [process.env[singleEnv]] : [];
   return [...single, ...numbered, ...csv]
-    .map(k => (k || "").trim())
+    .map(k => (k || "").trim().replace(/^["']|["']$/g, "").trim())
     .filter(Boolean)
     .filter((k, i, a) => a.indexOf(k) === i);
 }
@@ -141,18 +141,21 @@ async function callGemini(payload) {
   let lastErr;
   for (const key of keys) {
     for (const model of GEMINI_MODELS) {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
       try {
         const res = await fetchT(url, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": key
+          },
           body: JSON.stringify(payload)
         });
         const data = await res.json();
         if (!res.ok) {
           lastErr = { status: res.status, message: `${model}: ${data?.error?.message || res.statusText}` };
-          // Jika key ini limit/habis kuota, LANGSUNG ganti ke key Gemini berikutnya!
-          if (res.status === 429 || data?.error?.message?.toLowerCase().includes("quota")) {
+          // Jika key ini tidak valid (401), tidak berhak (403), atau limit/kuota habis (429), LANGSUNG ganti ke key berikutnya!
+          if (res.status === 401 || res.status === 403 || res.status === 429 || data?.error?.message?.toLowerCase().includes("quota") || data?.error?.message?.toLowerCase().includes("key")) {
             break;
           }
           continue;
