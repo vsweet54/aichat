@@ -15,13 +15,12 @@ const OPENROUTER_MODELS = [
   "openrouter/free"
 ];
 
-// NVIDIA NIM Vision Models (90b terbukti aktif & responsif)
+// NVIDIA NIM Vision Models (90B terbukti aktif & akurat)
 const NVIDIA_MODELS = [
-  "meta/llama-3.2-90b-vision-instruct",
-  "mistralai/pixtral-12b"
+  "meta/llama-3.2-90b-vision-instruct"
 ];
 
-// Gemini Models (gemini-2.0-flash punya kuota 1500 req/hari, bukan 20)
+// Gemini Models (gemini-2.0-flash punya kuota 1500 req/hari)
 const GEMINI_MODELS = [
   "gemini-2.0-flash",
   "gemini-2.0-flash-exp",
@@ -30,8 +29,8 @@ const GEMINI_MODELS = [
   "gemini-3.8-flash"
 ];
 
-// Timeout per request (Vercel maxDuration adalah 30s)
-const TIMEOUT_MS = Number(process.env.TIMEOUT_MS || 16000);
+// Timeout 24s (Vercel maxDuration adalah 30s) agar NVIDIA 90B selesai membaca gambar
+const TIMEOUT_MS = Number(process.env.TIMEOUT_MS || 24000);
 
 // Sesuai instruksi user: Gemini selalu di urutan terakhir
 const PROVIDER_ORDER = ["openrouter", "nvidia", "gemini"];
@@ -64,7 +63,7 @@ async function callOpenRouter(messages) {
       const data = await res.json();
       if (!res.ok) {
         lastErr = { status: res.status, message: `${model}: ${data?.error?.message || res.statusText}` };
-        // Jika limit kuota harian habis, langsung hentikan OpenRouter agar hemat waktu
+        // Jika terkena kuota harian akun free, langsung hentikan OpenRouter agar instan ke NVIDIA
         if (res.status === 429 && data?.error?.message?.includes("free-models-per-day")) {
           break;
         }
@@ -92,6 +91,7 @@ async function callNvidia(messages) {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "Accept": "application/json",
           "Authorization": `Bearer ${NVIDIA_KEY}`
         },
         body: JSON.stringify({ model: m, messages, max_tokens: 300, temperature: 0.1 })
