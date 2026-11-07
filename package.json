@@ -1,0 +1,26 @@
+{
+  "name": "neoai-backend",
+  "version": "2.0.0",
+  "description": "Vercel Serverless Multi-Provider AI Backend for NEOAI",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node --test tests/*.test.js"
+  },
+  "keywords": [
+    "neoai",
+    "vercel-serverless",
+    "multi-model",
+    "gemini",
+    "groq",
+    "openai",
+    "openrouter",
+    "pollinations"
+  ],
+  "author": "NEOAI Team",
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {}
+}
